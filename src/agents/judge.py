@@ -1,14 +1,21 @@
+from typing import List
+from enum import Enum
 from openai import AsyncOpenAI
 from loguru import logger
 from pydantic import BaseModel, Field
-from typing import List
 from ..models import DocumentState, EditorResponse, JudgeFeedback
+from asyncio import sleep as asyncio_sleep
+
+class Decision(str, Enum):
+    """Decision options for document review"""
+    APPROVE = "APPROVE"
+    REVISE = "REVISE"
 
 class JudgeReviewResponse(BaseModel):
     """Structured response for document review"""
     feedback: str = Field(..., description="Detailed feedback about the document changes")
     recommendations: List[str] = Field(..., description="List of specific recommendations for improvement")
-    decision: str = Field(..., description="Decision whether to approve or revise", pattern="^(APPROVE|REVISE)$")
+    decision: Decision = Field(..., description="Decision whether to approve or revise")
 
 class JudgeAgent:
     def __init__(self, model: str = "gpt-4o-mini"):
@@ -80,9 +87,9 @@ class JudgeAgent:
                 raise ValueError("Model refused to provide review")
 
             return JudgeFeedback(
-                approved=review.decision == "APPROVE",
+                approved=review.decision == Decision.APPROVE,
                 recommendations=review.recommendations,
-                revision_required=review.decision == "REVISE"
+                revision_required=review.decision == Decision.REVISE
             )
 
         except Exception as e:
@@ -108,4 +115,4 @@ class JudgeAgent:
                     raise
                 wait_time = 2 ** attempt  # Exponential backoff
                 logger.warning(f"Attempt {attempt + 1} failed, retrying in {wait_time}s: {str(e)}")
-                await asyncio.sleep(wait_time)
+                await asyncio_sleep(wait_time)
