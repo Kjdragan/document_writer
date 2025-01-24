@@ -12,7 +12,8 @@ dependencies = [
     "python-dotenv",
     "tavily-python",
     "rich",
-    "dirtyjson"
+    "dirtyjson",
+    "asyncio>=3.4.3",
 ]
 
 [project.optional-dependencies]

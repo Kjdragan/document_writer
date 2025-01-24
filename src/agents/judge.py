@@ -1,15 +1,21 @@
-from typing import List
+import os
+import json
+from datetime import datetime
+from typing import List, Optional, cast
 from openai import AsyncOpenAI
 from loguru import logger
+from rich.console import Console
 from pydantic import BaseModel, Field
+from enum import Enum, auto
+
 from ..models import DocumentState, EditorResponse, JudgeFeedback, Decision
-from asyncio import sleep as asyncio_sleep
 
 class JudgeReviewResponse(BaseModel):
     """Structured response for document review"""
     feedback: str = Field(..., description="Detailed feedback about the document changes")
-    recommendations: List[str] = Field(..., description="List of specific recommendations for improvement")
+    recommendations: List[str] = Field(default_factory=list, description="List of specific recommendations for improvement")
     decision: Decision = Field(..., description="Decision whether to approve or revise")
+    critique_severity: int = Field(default=0, ge=0, le=10, description="Severity of critique (0-10)")
 
 class JudgeAgent:
     def __init__(self, model: str = "gpt-4o-mini"):
@@ -21,6 +27,7 @@ class JudgeAgent:
         """
         self.model = model
         self.client = AsyncOpenAI()
+        self.console = Console()
 
     async def review_document(self, original: DocumentState, edited: EditorResponse) -> JudgeFeedback:
         """
@@ -35,50 +42,95 @@ class JudgeAgent:
         """
         try:
             # Prepare system message for the judge role
-            system_message = """You are an expert judge evaluating document improvements. 
-            Analyze the original and edited versions to assess:
-            1. Content accuracy and completeness
-            2. Structural improvements
-            3. Clarity and readability
-            4. Proper handling of topics
-            5. Overall document quality
-            
-            Provide specific recommendations if improvements are needed."""
+            system_message = """You are a rigorous, expert-level document quality assessor. 
+            Your task is to provide an exhaustive, critical review of the document:
+
+            REVIEW CRITERIA:
+            1. Content Depth and Accuracy
+               - Verify factual correctness
+               - Assess comprehensiveness of topic coverage
+               - Identify potential knowledge gaps
+
+            2. Structural and Organizational Analysis
+               - Evaluate logical flow and coherence
+               - Check for clear section transitions
+               - Assess argument progression
+
+            3. Language and Communication
+               - Analyze clarity and readability
+               - Check for conciseness
+               - Identify complex or unclear passages
+
+            4. Source and Reference Quality
+               - Evaluate source credibility
+               - Check for balanced perspective
+               - Identify potential bias
+
+            5. Technical and Scholarly Rigor
+               - Assess technical accuracy
+               - Check for appropriate technical depth
+               - Verify use of domain-specific terminology
+
+            PROVIDE:
+            - Detailed, constructive feedback
+            - Specific, actionable recommendations
+            - Clear decision on document quality
+            """
 
             # Prepare the review prompt
-            user_message = f"""Review the following document versions:
-            
-            Original Document:
+            user_message = f"""DOCUMENT REVIEW REQUEST
+
+            ORIGINAL DOCUMENT:
             Topics: {', '.join(original.topics)}
             Version: {original.version}
-            Content:
-            {original.content}
-            
-            Edited Document:
-            Version: {edited.version}
-            Changes Made:
-            {chr(10).join(edited.revision_notes) if edited.revision_notes else 'No revision notes provided'}
-            
-            Content:
-            {edited.content}
-            
-            Evaluate the changes and provide structured feedback."""
+            Content Length: {len(original.content)} characters
 
-            # Call OpenAI API with response format
-            completion = await self.client.beta.chat.completions.parse(
+            EDITED DOCUMENT:
+            Version: {edited.version}
+            Revision Notes: {chr(10).join(edited.revision_notes) if edited.revision_notes else 'No revision notes'}
+            Content Length: {len(edited.content)} characters
+
+            REVIEW INSTRUCTIONS:
+            1. Perform a comprehensive, multi-dimensional analysis
+            2. Provide granular, specific recommendations
+            3. Decide whether the document needs further revision
+            4. Rate the critique severity (0-10)
+
+            Deliver a structured, professional, and actionable review."""
+
+            # Call OpenAI API with detailed response
+            completion = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_message},
                     {"role": "user", "content": user_message}
                 ],
-                response_format=JudgeReviewResponse,
+                response_format={"type": "json_object"},
+                max_tokens=1500
             )
 
-            # Get the parsed response
-            review = completion.choices[0].message.parsed
-            if not review:
-                logger.error("Model refused to provide review")
-                raise ValueError("Model refused to provide review")
+            # Parse the response
+            response_text = cast(str, completion.choices[0].message.content)
+            if not response_text:
+                logger.error("Empty response from OpenAI")
+                raise ValueError("Empty response from OpenAI")
+                
+            try:
+                review_data = json.loads(response_text)
+                
+                # Create JudgeReviewResponse from parsed data
+                review = JudgeReviewResponse(
+                    feedback=review_data.get('feedback', 'No detailed feedback provided'),
+                    recommendations=review_data.get('recommendations', []),
+                    decision=Decision.REVISE if review_data.get('decision', 'REVISE') == 'REVISE' else Decision.APPROVE,
+                    critique_severity=review_data.get('critique_severity', 5)
+                )
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse judge response: {str(e)}")
+                raise ValueError(f"Invalid JSON response from judge: {str(e)}")
+
+            # Save recommendations to _workproduct
+            await self._save_judge_recommendations(original.topics[0], review)
 
             return JudgeFeedback(
                 approved=review.decision == Decision.APPROVE,
@@ -90,23 +142,41 @@ class JudgeAgent:
             logger.error(f"Error during document review: {str(e)}")
             raise
 
-    async def _retry_with_backoff(self, func, max_retries: int = 2):
+    async def _save_judge_recommendations(self, topic: str, review: JudgeReviewResponse) -> None:
         """
-        Retry an async function with exponential backoff
+        Save judge's recommendations to a JSON file in _workproduct
         
         Args:
-            func: Async function to retry
-            max_retries: Maximum number of retry attempts
-            
-        Returns:
-            Function result
+            topic: Document topic
+            review: Judge's review response
         """
-        for attempt in range(max_retries + 1):
-            try:
-                return await func()
-            except Exception as e:
-                if attempt == max_retries:
-                    raise
-                wait_time = 2 ** attempt  # Exponential backoff
-                logger.warning(f"Attempt {attempt + 1} failed, retrying in {wait_time}s: {str(e)}")
-                await asyncio_sleep(wait_time)
+        try:
+            # Create filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            topic_slug = "_".join(topic.lower().split())[:50]
+            filename = f"02_judge_recommendations_{topic_slug}_{timestamp}.json"
+            
+            # Ensure _workproduct directory exists
+            os.makedirs("_workproduct", exist_ok=True)
+            
+            # Prepare recommendation data
+            recommendation_data = {
+                "topic": topic,
+                "timestamp": timestamp,
+                "feedback": review.feedback,
+                "recommendations": review.recommendations,
+                "decision": review.decision.name,
+                "critique_severity": review.critique_severity
+            }
+            
+            # Save file
+            filepath = os.path.join("_workproduct", filename)
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(recommendation_data, f, indent=2, ensure_ascii=False)
+                
+            logger.info(f"Saved judge recommendations to {filepath}")
+            self.console.print(f"[green]Judge recommendations saved to {filename}[/]")
+            
+        except Exception as e:
+            logger.error(f"Error saving judge recommendations: {str(e)}")
+            self.console.print(f"[red]Failed to save judge recommendations: {str(e)}[/]")

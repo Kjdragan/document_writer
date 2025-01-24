@@ -1,7 +1,8 @@
 import asyncio
 import os
+import json
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Dict, Any, List
 from openai import AsyncOpenAI
 from loguru import logger
 from rich.console import Console
@@ -27,9 +28,27 @@ class DocumentWriter:
         Args:
             topic: Topic to write about
         """
+        console.print(f"[bold blue]Starting document creation for topic: {topic}[/]")
+        
         try:
             # Initial research
-            articles = await self.research_service.search_topic(topic)
+            try:
+                console.print("[yellow]Performing research...[/]")
+                articles = await self.research_service.search_topic(topic)
+                
+                if not articles:
+                    logger.warning("No articles found for the topic")
+                    console.print("[red]No articles found for the given topic.[/]")
+                    return
+                
+                # Save raw research output
+                await self._save_raw_research(topic, articles)
+                
+                console.print(f"[green]Found {len(articles)} articles for research[/]")
+            except Exception as e:
+                logger.error(f"Error during document processing: {str(e)}")
+                console.print(f"[red]Error: Unable to research topic. {str(e)}[/]")
+                return
             
             # Create initial document state
             doc_state = DocumentState(
@@ -39,7 +58,9 @@ class DocumentWriter:
             )
             
             # Append analysis for each article
-            for article in articles:
+            console.print("[yellow]Analyzing articles...[/]")
+            for i, article in enumerate(articles, 1):
+                console.print(f"[blue]Analyzing article {i}/{len(articles)}[/]")
                 analysis = await self._analyze_article(article)
                 doc_state.content += f"\n\n{analysis}"
             
@@ -47,6 +68,7 @@ class DocumentWriter:
             await self.save_version(doc_state, "initial_research")
             
             # Now edit the complete document once
+            console.print("[yellow]Editing document...[/]")
             edited = await self.editor_agent.process_document(doc_state)
             doc_state = DocumentState(
                 content=edited.content,
@@ -63,6 +85,7 @@ class DocumentWriter:
                         
         except Exception as e:
             logger.error(f"Error during document processing: {str(e)}")
+            console.print(f"[red]Critical error: {str(e)}[/]")
             raise
 
     async def _analyze_article(self, article: TavilyArticle) -> str:
@@ -108,6 +131,52 @@ class DocumentWriter:
         except Exception as e:
             logger.error(f"Error analyzing article: {str(e)}")
             return "Error analyzing article: Unable to process content"
+
+    async def _save_raw_research(self, topic: str, articles: List[TavilyArticle]) -> None:
+        """Save raw research data as a JSON file
+        
+        Args:
+            topic: Research topic
+            articles: List of articles found
+        """
+        try:
+            # Create filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            topic_slug = "_".join(topic.lower().split())[:50]  # First topic, slugified
+            filename = f"00_raw_research_{topic_slug}_{timestamp}.json"
+            
+            # Ensure _workproduct directory exists
+            os.makedirs("_workproduct", exist_ok=True)
+            
+            # Prepare raw research data
+            raw_data = {
+                "topic": topic,
+                "timestamp": timestamp,
+                "total_articles": len(articles),
+                "articles": [
+                    {
+                        "title": article.title,
+                        "url": article.url,
+                        "content": article.content,
+                        "raw_content": article.raw_content,
+                        "content_length": len(article.content),
+                        "raw_content_length": len(article.raw_content) if article.raw_content else 0,
+                        "score": article.score
+                    } for article in articles
+                ]
+            }
+            
+            # Save file
+            filepath = os.path.join("_workproduct", filename)
+            with open(filepath, "w", encoding="utf-8") as f:
+                json.dump(raw_data, f, indent=2, ensure_ascii=False)
+                
+            logger.info(f"Saved raw research data to {filepath}")
+            console.print(f"[green]Raw research data saved to {filename}[/]")
+            
+        except Exception as e:
+            logger.error(f"Error saving raw research data: {str(e)}")
+            console.print(f"[red]Failed to save raw research data: {str(e)}[/]")
 
     async def save_version(self, doc_state: DocumentState, stage: str) -> None:
         """Save a version of the document
