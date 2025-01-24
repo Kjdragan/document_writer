@@ -1,6 +1,14 @@
-import openai
+from openai import AsyncOpenAI
 from loguru import logger
+from pydantic import BaseModel, Field
+from typing import List
 from ..models import DocumentState, EditorResponse, JudgeFeedback
+
+class JudgeReviewResponse(BaseModel):
+    """Structured response for document review"""
+    feedback: str = Field(..., description="Detailed feedback about the document changes")
+    recommendations: List[str] = Field(..., description="List of specific recommendations for improvement")
+    decision: str = Field(..., description="Decision whether to approve or revise", pattern="^(APPROVE|REVISE)$")
 
 class JudgeAgent:
     def __init__(self, model: str = "gpt-4o-mini"):
@@ -11,6 +19,7 @@ class JudgeAgent:
             model: OpenAI model to use for review
         """
         self.model = model
+        self.client = AsyncOpenAI()
 
     async def review_document(self, original: DocumentState, edited: EditorResponse) -> JudgeFeedback:
         """
@@ -54,49 +63,26 @@ class JudgeAgent:
             
             Evaluate the changes and provide structured feedback."""
 
-            # Call OpenAI API
-            response = await openai.ChatCompletion.acreate(
+            # Call OpenAI API with response format
+            completion = await self.client.beta.chat.completions.parse(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_message},
                     {"role": "user", "content": user_message}
                 ],
-                temperature=0.7
+                response_format=JudgeReviewResponse,
             )
 
-            # Analyze the feedback to determine approval
-            feedback_text = response.choices[0].message.content.strip()
-            
-            # Get specific recommendations
-            recommendations_response = await openai.ChatCompletion.acreate(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "Extract specific recommendations from the review as a list."},
-                    {"role": "user", "content": feedback_text}
-                ],
-                temperature=0.7
-            )
-            
-            recommendations = recommendations_response.choices[0].message.content.strip().split('\n')
-
-            # Determine if revisions are required
-            approval_response = await openai.ChatCompletion.acreate(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "Based on the review, should the document be approved or does it need revision? Respond with 'APPROVE' or 'REVISE'."},
-                    {"role": "user", "content": feedback_text}
-                ],
-                temperature=0.3
-            )
-            
-            decision = approval_response.choices[0].message.content.strip()
-            approved = decision == "APPROVE"
-            revision_required = not approved
+            # Get the parsed response
+            review = completion.choices[0].message.parsed
+            if not review:
+                logger.error("Model refused to provide review")
+                raise ValueError("Model refused to provide review")
 
             return JudgeFeedback(
-                approved=approved,
-                recommendations=recommendations,
-                revision_required=revision_required
+                approved=review.decision == "APPROVE",
+                recommendations=review.recommendations,
+                revision_required=review.decision == "REVISE"
             )
 
         except Exception as e:

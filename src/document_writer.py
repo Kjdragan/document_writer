@@ -4,7 +4,7 @@ from loguru import logger
 from rich.console import Console
 from rich.prompt import Confirm, Prompt
 
-from .models import DocumentState
+from .models import DocumentState, EditorResponse
 from .services.research import ResearchService
 from .services.document import DocumentService
 from .agents.editor import EditorAgent
@@ -53,108 +53,80 @@ class DocumentWriter:
             logger.error(f"Error during initial research: {str(e)}")
             raise
 
-    async def expansion_loop(self, current_doc: DocumentState) -> bool:
+    async def expansion_loop(self, doc_state: DocumentState) -> bool:
         """
-        Handle document expansion flow
+        Run expansion loop on document
         
         Args:
-            current_doc: Current document state
+            doc_state: Current document state
             
         Returns:
-            True if expansion should continue, False if ready for editing
+            True if more expansion needed, False if complete
         """
         try:
-            # Ask user if they want to expand or finalize
-            should_expand = Confirm.ask("\nWould you like to expand the document with a new topic?")
+            # Get feedback from judge
+            feedback = await self.judge_agent.review_document(doc_state, EditorResponse(
+                content=doc_state.content,
+                version=doc_state.version,
+                revision_notes=None
+            ))
             
-            if not should_expand:
+            if not feedback.revision_required:
                 return False
                 
-            # Get new topic
-            new_topic = Prompt.ask("\nEnter the new topic to research")
+            # Apply edits based on feedback
+            edited_response = await self.editor_agent.process_document(doc_state)
             
-            console.print(f"\n[bold blue]Researching expansion topic:[/] {new_topic}")
+            # Update document state
+            doc_state.content = edited_response.content
+            doc_state.version = edited_response.version
             
-            # Research new topic
-            results = await self.research_service.search(new_topic)
-            if not results:
-                console.print(f"[yellow]No results found for topic: {new_topic}[/]")
-                return True
-                
-            # Process new content
-            new_content = await self.research_service.process_results(results)
-            
-            # Append to document
-            updated_doc = self.document_service.append_content(
-                current_doc,
-                new_content,
-                new_topic
-            )
-            
-            # Save expansion version
-            self.document_service.save_version(updated_doc, "expansion")
+            # Save new version
+            self.document_service.save_version(doc_state, "expansion")
             
             return True
             
         except Exception as e:
-            logger.error(f"Error during expansion: {str(e)}")
+            logger.error(f"Error in expansion loop: {str(e)}")
             raise
 
-    async def editing_loop(self, doc: DocumentState) -> DocumentState:
+    async def editing_loop(self, doc_state: DocumentState) -> DocumentState:
         """
-        Handle editing and review flow
+        Run editing loop on document
         
         Args:
-            doc: Document to edit
+            doc_state: Current document state
             
         Returns:
-            Final approved document state
+            Final document state
         """
-        current_doc = doc
-        max_iterations = 3  # Prevent infinite loops
-        iteration = 0
-        
-        while iteration < max_iterations:
-            try:
-                console.print("\n[bold blue]Editing document...[/]")
+        try:
+            while True:
+                # Get feedback from judge
+                feedback = await self.judge_agent.review_document(doc_state, EditorResponse(
+                    content=doc_state.content,
+                    version=doc_state.version,
+                    revision_notes=None
+                ))
                 
-                # Submit to editor
-                editor_response = await self.editor_agent.process_document(current_doc)
-                
-                # Save editor's version
-                current_doc.content = editor_response.content
-                current_doc.version = editor_response.version
-                self.document_service.save_version(current_doc, "editor_draft")
-                
-                console.print("\n[bold blue]Reviewing changes...[/]")
-                
-                # Get judge's feedback
-                feedback = await self.judge_agent.review_document(doc, editor_response)
-                
-                # Display recommendations
-                console.print("\n[bold yellow]Review Feedback:[/]")
-                for rec in feedback.recommendations:
-                    console.print(f"• {rec}")
-                
-                if feedback.approved:
-                    console.print("\n[bold green]Document approved![/]")
+                if not feedback.revision_required:
+                    break
                     
-                    # Save final version
-                    self.document_service.save_version(current_doc, "final")
-                    return current_doc
-                    
-                if feedback.revision_required:
-                    console.print("\n[yellow]Revision required. Continuing editing...[/]")
-                    iteration += 1
-                    continue
-                    
-            except Exception as e:
-                logger.error(f"Error during editing loop: {str(e)}")
-                raise
+                # Apply edits based on feedback
+                edited_response = await self.editor_agent.process_document(doc_state)
                 
-        console.print("\n[yellow]Max editing iterations reached. Saving current version as final.[/]")
-        self.document_service.save_version(current_doc, "final")
-        return current_doc
+                # Update document state
+                doc_state.content = edited_response.content
+                doc_state.version = edited_response.version
+                
+                # Save new version
+                self.document_service.save_version(doc_state, "editing")
+            
+            return doc_state
+            
+        except Exception as e:
+            logger.error(f"Error in editing loop: {str(e)}")
+            raise
 
     async def process_document(self, initial_topic: str):
         """
@@ -180,4 +152,26 @@ class DocumentWriter:
                         
         except Exception as e:
             logger.error(f"Error during document processing: {str(e)}")
+            raise
+
+    async def continue_latest(self, topic_filter: Optional[str] = None) -> None:
+        """
+        Continue working on the latest document version
+        
+        Args:
+            topic_filter: Optional topic to filter by
+        """
+        try:
+            # Get latest version
+            latest_doc = self.document_service.get_latest_version(topic_filter)
+            
+            if not latest_doc:
+                console.print("[yellow]No existing document found.[/]")
+                return
+                
+            # Run expansion and editing process
+            await self.process_document(latest_doc.topics[0])
+            
+        except Exception as e:
+            logger.error(f"Error while continuing document: {str(e)}")
             raise

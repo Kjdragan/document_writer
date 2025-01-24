@@ -1,9 +1,9 @@
 import asyncio
 import os
 from typing import Optional
-import typer
 from loguru import logger
 from rich.console import Console
+from rich.prompt import Prompt
 from dotenv import load_dotenv
 
 # Adjust imports for direct execution
@@ -25,15 +25,11 @@ logger.add(
     level="INFO"
 )
 
-app = typer.Typer()
 console = Console()
 
-@app.command()
-def create(
-    topic: str = typer.Argument(..., help="Initial topic to research"),
-):
+def create_document():
     """
-    Create a new document based on the given topic
+    Create a new document by prompting for a topic
     """
     try:
         # Verify required environment variables
@@ -42,7 +38,14 @@ def create(
         
         if missing_vars:
             console.print(f"[red]Missing required environment variables: {', '.join(missing_vars)}[/]")
-            raise typer.Exit(1)
+            return
+            
+        # Get topic from user
+        topic = Prompt.ask("\n[bold blue]Enter the topic you want to research[/]")
+        
+        if not topic.strip():
+            console.print("[red]Topic cannot be empty[/]")
+            return
             
         # Create document writer
         writer = DocumentWriter()
@@ -51,50 +54,49 @@ def create(
         asyncio.run(writer.process_document(topic))
         
     except Exception as e:
-        logger.error(f"Error during document creation: {str(e)}")
+        logger.exception("Error in document creation")
         console.print(f"[red]Error: {str(e)}[/]")
-        raise typer.Exit(1)
 
-@app.command()
-def continue_doc(
-    topic: Optional[str] = typer.Argument(None, help="Topic to filter by (optional)")
-):
+def continue_document():
     """
-    Continue working on the latest document version
+    Continue working on the latest document version with optional topic filter
     """
     try:
-        # Verify required environment variables
-        required_vars = ["OPENAI_API_KEY", "TAVILY_API_KEY"]
-        missing_vars = [var for var in required_vars if not os.getenv(var)]
+        use_filter = Prompt.ask(
+            "\n[bold blue]Do you want to filter by topic?[/]",
+            choices=["y", "n"],
+            default="n"
+        )
         
-        if missing_vars:
-            console.print(f"[red]Missing required environment variables: {', '.join(missing_vars)}[/]")
-            raise typer.Exit(1)
-            
-        # Create document writer
+        topic = None
+        if use_filter.lower() == "y":
+            topic = Prompt.ask("[bold blue]Enter topic to filter by[/]")
+        
         writer = DocumentWriter()
-        
-        # Get latest version
-        latest_doc = writer.document_service.get_latest_version(topic)
-        
-        if not latest_doc:
-            console.print("[yellow]No existing document found.[/]")
-            raise typer.Exit(1)
-            
-        # Run expansion and editing process
-        asyncio.run(writer.process_document(latest_doc.topics[0]))
+        asyncio.run(writer.continue_latest(topic))
         
     except Exception as e:
-        logger.error(f"Error while continuing document: {str(e)}")
+        logger.exception("Error in document continuation")
         console.print(f"[red]Error: {str(e)}[/]")
-        raise typer.Exit(1)
 
 def main():
+    while True:
+        console.print("\n[bold green]Document Writer[/]")
+        choice = Prompt.ask(
+            "Choose an action",
+            choices=["1", "2", "3"],
+            default="1"
+        )
+        
+        if choice == "1":
+            create_document()
+        elif choice == "2":
+            continue_document()
+        else:
+            break
+
+if __name__ == "__main__":
     # Create logs directory if it doesn't exist
     os.makedirs("logs", exist_ok=True)
     
-    # Run CLI
-    app()
-
-if __name__ == "__main__":
     main()

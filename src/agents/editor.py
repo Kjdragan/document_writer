@@ -1,7 +1,13 @@
 from typing import List
-import openai
+from openai import AsyncOpenAI
 from loguru import logger
+from pydantic import BaseModel, Field
 from ..models import DocumentState, EditorResponse
+
+class EditorRevisionResponse(BaseModel):
+    """Structured response for document revision"""
+    improved_content: str = Field(..., description="The improved version of the document")
+    revision_notes: List[str] = Field(..., description="List of key improvements and changes made")
 
 class EditorAgent:
     def __init__(self, model: str = "gpt-4o-mini"):
@@ -12,6 +18,7 @@ class EditorAgent:
             model: OpenAI model to use for processing
         """
         self.model = model
+        self.client = AsyncOpenAI()
 
     async def process_document(self, doc: DocumentState) -> EditorResponse:
         """
@@ -45,34 +52,25 @@ class EditorAgent:
             
             Provide the improved version maintaining all key information but enhancing readability and structure."""
 
-            # Call OpenAI API
-            response = await openai.ChatCompletion.acreate(
+            # Call OpenAI API with response format
+            completion = await self.client.beta.chat.completions.parse(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_message},
                     {"role": "user", "content": user_message}
                 ],
-                temperature=0.7
+                response_format=EditorRevisionResponse,
             )
 
-            # Extract improved content
-            improved_content = response.choices[0].message.content.strip()
-
-            # Get explanation of changes
-            explanation_response = await openai.ChatCompletion.acreate(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": "List the key improvements made to the document."},
-                    {"role": "user", "content": f"Original:\n{doc.content}\n\nImproved:\n{improved_content}"}
-                ],
-                temperature=0.7
-            )
-
-            revision_notes = explanation_response.choices[0].message.content.strip().split('\n')
+            # Get the parsed response
+            revision = completion.choices[0].message.parsed
+            if not revision:
+                logger.error("Model refused to provide revision")
+                raise ValueError("Model refused to provide revision")
 
             return EditorResponse(
-                content=improved_content,
-                revision_notes=revision_notes,
+                content=revision.improved_content,
+                revision_notes=revision.revision_notes,
                 version=doc.version + 1
             )
 
