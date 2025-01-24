@@ -1,5 +1,4 @@
-from typing import Optional, List, Dict, Any
-from enum import Enum
+from typing import List, Optional
 from pydantic import BaseModel, Field
 from datetime import datetime
 
@@ -29,19 +28,12 @@ class DocumentState(BaseModel):
     content: str
     topics: List[str]
     version: int
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    sources: List[str] = Field(default_factory=list)
 
 class EditorResponse(BaseModel):
     """Response from editor agent"""
     content: str
-    revision_notes: List[str] = Field(default_factory=list)
+    revision_notes: List[str]
     version: int
-
-class Decision(str, Enum):
-    """Decision options for document review"""
-    APPROVE = "APPROVE"
-    REVISE = "REVISE"
 
 class JudgeFeedback(BaseModel):
     """Feedback from judge agent"""

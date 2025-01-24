@@ -1,15 +1,9 @@
 from typing import List
-from enum import Enum
 from openai import AsyncOpenAI
 from loguru import logger
 from pydantic import BaseModel, Field
-from ..models import DocumentState, EditorResponse, JudgeFeedback
+from ..models import DocumentState, EditorResponse, JudgeFeedback, Decision
 from asyncio import sleep as asyncio_sleep
-
-class Decision(str, Enum):
-    """Decision options for document review"""
-    APPROVE = "APPROVE"
-    REVISE = "REVISE"
 
 class JudgeReviewResponse(BaseModel):
     """Structured response for document review"""
