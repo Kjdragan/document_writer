@@ -1,0 +1,5 @@
+2025-01-24 08:57:32 | INFO     | __main__:<module>:235 - Starting Document Writer Application
+2025-01-24 08:57:36 | INFO     | __main__:main:188 - User selected option: 1
+2025-01-24 08:57:36 | INFO     | __main__:main:191 - Starting document creation process
+2025-01-24 08:57:36 | INFO     | __main__:create_document:89 - Starting document creation process
+2025-01-24 08:57:44 | INFO     | __main__:create_document:102 - Selected topic: latest news from Ukraine War

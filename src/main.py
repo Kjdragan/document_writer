@@ -1,19 +1,15 @@
 import asyncio
 import os
-from typing import Optional
-from loguru import logger
+import sys
+import signal
+import atexit
+from datetime import datetime
 from rich.console import Console
-from rich.prompt import Prompt
+from rich.prompt import Prompt, Confirm
+from loguru import logger
 from dotenv import load_dotenv
-
-# Adjust imports for direct execution
-if __name__ == "__main__":
-    import sys
-    from pathlib import Path
-    from datetime import datetime
-    sys.path.append(str(Path(__file__).parent.parent))
-
 from src.document_writer import DocumentWriter
+import shutil
 
 # Initialize console globally
 console = Console()
@@ -21,73 +17,61 @@ console = Console()
 # Load environment variables
 load_dotenv()
 
-# Configure logger
-logger.remove()
-
-def main():
-    """
-    Main entry point for the document writer application
-    """
+def setup_logging():
+    """Configure logging with proper file handling"""
     try:
-        # Configure logging with timestamped file
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "logs")
-        os.makedirs(log_dir, exist_ok=True)
-        log_file = os.path.join(log_dir, f"document_writer_{timestamp}.log")
+        # Remove default logger
+        logger.remove()
         
-        # Add file handler with timestamp
+        # Configure timestamped log file
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_file = os.path.join("logs", f"document_writer_{timestamp}.log")
+        
+        # Add file handler with rotation and retention
         logger.add(
             log_file,
             rotation="1 day",
             retention="7 days",
             level="DEBUG",
-            format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}"
+            format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
+            enqueue=True,  # Thread-safe logging
+            catch=True,    # Catch exceptions
         )
         
         # Add console logger for immediate feedback
         logger.add(
             sys.stderr,
             format="{time:HH:mm:ss} | {level: <8} | {message}",
-            level="INFO"
+            level="INFO",
+            enqueue=True,
+            catch=True,
         )
-
-        # Log application start
-        logger.info("Document Writer Application Started")
-        console.print("[bold green]Document Writer Application[/]")
         
-        while True:
-            # Display menu
-            console.print("\nChoose an action:")
-            console.print("1. Create New Document")
-            console.print("2. Continue Latest Document")
-            console.print("3. Exit")
-            
-            # Get user choice
-            choice = Prompt.ask("Choose an action [1/2/3]", default="1")
-            
-            # Log user choice
-            logger.info(f"User selected option: {choice}")
-            
-            if choice == "1":
-                create_document()
-            elif choice == "2":
-                continue_document()
-            elif choice == "3":
-                console.print("[yellow]Exiting Document Writer...[/]")
-                logger.info("Application exit")
-                break
-            else:
-                console.print("[red]Invalid choice. Please select 1, 2, or 3.[/]")
-                logger.warning(f"Invalid menu choice: {choice}")
-                
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Operation cancelled by user.[/]")
-        logger.info("Application interrupted by user")
+        return log_file
     except Exception as e:
-        logger.error(f"Unexpected error in main application: {str(e)}")
-        console.print(f"[red]Critical error: {str(e)}[/]")
+        console.print(f"[red]Error setting up logging: {str(e)}[/]")
+        sys.exit(1)
 
-def create_document():
+def cleanup_logging(log_file):
+    """Ensure proper cleanup of logging resources"""
+    try:
+        logger.info("Shutting down logging...")
+        logger.remove()  # Remove all handlers
+        
+        # Small delay to ensure final messages are written
+        from time import sleep
+        sleep(0.1)
+        
+    except Exception as e:
+        console.print(f"[red]Error during logging cleanup: {str(e)}[/]")
+
+def signal_handler(signum, frame):
+    """Handle interrupt signals"""
+    logger.info(f"Received signal {signum}")
+    cleanup_logging(current_log_file)
+    sys.exit(0)
+
+async def create_document():
     """
     Create a new document by prompting for a topic
     """
@@ -103,8 +87,7 @@ def create_document():
         
         # Log start of document creation process    
         logger.info("Starting document creation process")
-        console.print("[bold blue]Document Writer[/]")
-        console.print("[yellow]Checking environment and configuration...[/]")
+        console.print("\n[bold blue]Document Writer[/]")
             
         # Get topic from user
         topic = Prompt.ask("\n[bold blue]Enter the topic you want to research[/]")
@@ -118,23 +101,16 @@ def create_document():
         logger.info(f"Selected topic: {topic}")
         console.print(f"[green]Selected Topic:[/] {topic}")
         
-        # Create document writer
+        # Create document writer and process document
         writer = DocumentWriter()
-        
-        # Confirm document creation
-        console.print("\n[yellow]Preparing to create document...[/]")
-        if Prompt.ask("Do you want to proceed with document creation?", default=True):
-            # Run document creation
-            asyncio.run(writer.process_document(topic))
-        else:
-            console.print("[red]Document creation cancelled.[/]")
-            logger.info("Document creation cancelled by user")
+        await writer.process_document(topic)
 
     except Exception as e:
-        logger.exception("Error in document creation")
+        logger.error(f"Error in document creation: {str(e)}")
         console.print(f"[red]Error: {str(e)}[/]")
+        raise
 
-def continue_document():
+async def continue_document():
     """
     Continue working on the latest document version with optional topic filter
     """
@@ -158,11 +134,96 @@ def continue_document():
         writer = DocumentWriter()
         
         # Run continue latest document
-        asyncio.run(writer.continue_latest(topic_filter))
+        await writer.continue_latest(topic_filter)
         
     except Exception as e:
         logger.error(f"Error in continue document: {str(e)}")
         console.print(f"[red]Error: {str(e)}[/]")
 
+def setup_directories():
+    """Clean and recreate working directories"""
+    # Remove default logger to prevent duplicate logging
+    logger.remove()
+    
+    directories = ['logs', '_workproduct']
+    
+    for directory in directories:
+        # Remove directory if it exists
+        if os.path.exists(directory):
+            try:
+                print(f"Cleaning directory: {directory}")  # Use print instead of logger
+                shutil.rmtree(directory)
+            except Exception as e:
+                print(f"Error cleaning {directory}: {str(e)}")
+                
+        # Create fresh directory
+        try:
+            print(f"Creating directory: {directory}")  # Use print instead of logger
+            os.makedirs(directory)
+        except Exception as e:
+            print(f"Error creating {directory}: {str(e)}")
+            raise
+
+def main():
+    """Main entry point for the document writer application"""
+    try:
+        writer = DocumentWriter()
+        
+        while True:
+            console.print("\nChoose an action:")
+            console.print("1. Create New Document")
+            console.print("2. Continue Latest Document")
+            console.print("3. Exit")
+            
+            choice = Prompt.ask("Choose an action", choices=["1", "2", "3"], default="1")
+            logger.info(f"User selected option: {choice}")
+            
+            if choice == "1":
+                logger.info("Starting document creation process")
+                console.print("\nDocument Writer")
+                asyncio.run(create_document())
+            elif choice == "2":
+                logger.info("Starting document continuation process")
+                console.print("\nContinue Latest Document")
+                asyncio.run(continue_document())
+            else:
+                logger.info("User chose to exit")
+                break
+                
+    except KeyboardInterrupt:
+        logger.info("Received keyboard interrupt")
+        console.print("\n[yellow]Shutting down gracefully...[/]")
+    except Exception as e:
+        logger.error(f"Critical error: {str(e)}")
+        console.print(f"\n[red]Critical error: {str(e)}[/]")
+    finally:
+        cleanup_logging(current_log_file)
+
 if __name__ == "__main__":
-    main()
+    # Import here to avoid circular imports
+    import shutil
+    from src.document_writer import DocumentWriter
+    from rich.prompt import Prompt
+    from rich.console import Console
+    
+    console = Console()
+    
+    try:
+        # Clean and setup directories before any logging
+        setup_directories()
+        
+        # Now configure logging
+        current_log_file = setup_logging()
+        
+        # Set up signal handlers
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        
+        # Register cleanup for normal exit
+        atexit.register(cleanup_logging, current_log_file)
+        
+        # Start application
+        logger.info("Starting Document Writer Application")
+        main()
+    except Exception as e:
+        console.print(f"\n[red]Critical error: {str(e)}[/]")

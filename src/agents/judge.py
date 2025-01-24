@@ -1,8 +1,9 @@
 import os
 import json
 from datetime import datetime
-from typing import List, Optional, cast
+from typing import List, Optional
 from openai import AsyncOpenAI
+import instructor
 from loguru import logger
 from rich.console import Console
 from pydantic import BaseModel, Field
@@ -18,15 +19,20 @@ class JudgeReviewResponse(BaseModel):
     critique_severity: int = Field(default=0, ge=0, le=10, description="Severity of critique (0-10)")
 
 class JudgeAgent:
-    def __init__(self, model: str = "gpt-4o-mini"):
+    def __init__(self, model: str = "deepseek-chat"):
         """
         Initialize judge agent
         
         Args:
-            model: OpenAI model to use for review
+            model: Model to use for review
         """
         self.model = model
-        self.client = AsyncOpenAI()
+        # Initialize with Instructor and Deepseek
+        client = AsyncOpenAI(
+            api_key=os.getenv("DEEPSEEK_API_KEY"),
+            base_url="https://api.deepseek.com/v1"
+        )
+        self.client = instructor.patch(client)
         self.console = Console()
 
     async def review_document(self, original: DocumentState, edited: EditorResponse) -> JudgeFeedback:
@@ -96,9 +102,18 @@ class JudgeAgent:
             3. Decide whether the document needs further revision
             4. Rate the critique severity (0-10)
 
+            RESPONSE FORMAT:
+            Provide your response as a JSON object with the following structure:
+            {
+                "feedback": "Detailed feedback about the document changes",
+                "recommendations": ["List of specific recommendations"],
+                "decision": "APPROVE or REVISE",
+                "critique_severity": <number between 0-10>
+            }
+
             Deliver a structured, professional, and actionable review."""
 
-            # Call OpenAI API with detailed response
+            # Call Deepseek API with Instructor for structured output
             completion = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -106,14 +121,14 @@ class JudgeAgent:
                     {"role": "user", "content": user_message}
                 ],
                 response_format={"type": "json_object"},
-                max_tokens=1500
+                max_tokens=3000
             )
 
             # Parse the response
-            response_text = cast(str, completion.choices[0].message.content)
+            response_text = completion.choices[0].message.content
             if not response_text:
-                logger.error("Empty response from OpenAI")
-                raise ValueError("Empty response from OpenAI")
+                logger.error("Empty response from Deepseek")
+                raise ValueError("Empty response from Deepseek")
                 
             try:
                 review_data = json.loads(response_text)

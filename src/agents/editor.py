@@ -1,29 +1,36 @@
-from typing import List, Optional, cast
-from openai import AsyncOpenAI
-from loguru import logger
-from pydantic import BaseModel, Field
-from ..models import DocumentState, EditorResponse
-import json
-import asyncio
 import os
+import json
 from datetime import datetime
+from typing import List, Optional
+from openai import AsyncOpenAI
+import instructor
+from loguru import logger
 from rich.console import Console
+from pydantic import BaseModel, Field
+import asyncio
+
+from ..models import DocumentState, EditorResponse
 
 class EditorRevisionResponse(BaseModel):
     """Structured response for document revision"""
     improved_content: str = Field(..., description="The improved version of the document")
-    revision_notes: List[str] = Field(..., description="List of key improvements and changes made")
+    revision_notes: List[str] = Field(default_factory=list, description="List of key improvements and changes made")
 
 class EditorAgent:
-    def __init__(self, model: str = "gpt-4o-mini"):
+    def __init__(self, model: str = "deepseek-chat"):
         """
         Initialize editor agent
         
         Args:
-            model: OpenAI model to use for processing
+            model: Model to use for processing
         """
         self.model = model
-        self.client = AsyncOpenAI()
+        # Initialize with Instructor and Deepseek
+        client = AsyncOpenAI(
+            api_key=os.getenv("DEEPSEEK_API_KEY"),
+            base_url="https://api.deepseek.com/v1"
+        )
+        self.client = instructor.patch(client)
         self.console = Console()
 
     async def process_document(self, doc: DocumentState) -> EditorResponse:
@@ -37,7 +44,7 @@ class EditorAgent:
             EditorResponse with improved content and notes
         """
         try:
-            # Comprehensive system message for the editor role
+            # Prepare system message for the editor role
             system_message = """You are an advanced AI document editor with expertise in technical and academic writing. 
             Your mission is to transform raw content into a polished, professional document.
 
@@ -72,11 +79,6 @@ class EditorAgent:
             - Make surgical, meaningful improvements
             - Provide transparent revision notes
             - Target an audience of informed professionals
-
-            OUTPUT REQUIREMENTS:
-            - Deliver a fully revised document
-            - List specific improvements made
-            - Maintain original document's core knowledge
             """
 
             # Detailed editing prompt
@@ -94,43 +96,24 @@ class EditorAgent:
             1. Perform a comprehensive, multi-dimensional document refinement
             2. Improve overall document quality
             3. Provide specific, actionable revision notes
-            4. Maintain the original document's core insights and intent
+            4. Maintain the original document's core insights and intent"""
 
-            Deliver a meticulously edited document with clear improvement rationale."""
-
-            # Call OpenAI API with detailed response
+            # Call Deepseek API with Instructor for structured output
             completion = await self.client.chat.completions.create(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_message},
                     {"role": "user", "content": user_message}
                 ],
-                response_format={"type": "json_object"},
-                max_tokens=3000
+                response_model=EditorRevisionResponse,
+                max_tokens=3000,
+                temperature=0.7
             )
 
-            # Parse the response
-            response_text = cast(str, completion.choices[0].message.content)
-            if not response_text:
-                logger.error("Empty response from OpenAI")
-                raise ValueError("Empty response from OpenAI")
-                
-            try:
-                revision_data = json.loads(response_text)
-                
-                # Create EditorRevisionResponse from parsed data
-                revision = EditorRevisionResponse(
-                    improved_content=revision_data.get('improved_content', doc.content),
-                    revision_notes=revision_data.get('revision_notes', ['No specific revisions noted'])
-                )
-            except json.JSONDecodeError as e:
-                logger.error(f"Failed to parse editor response: {str(e)}")
-                raise ValueError(f"Invalid JSON response from editor: {str(e)}")
-
-            # Create editor response
+            # Create editor response from structured output
             editor_response = EditorResponse(
-                content=revision.improved_content,
-                revision_notes=revision.revision_notes,
+                content=completion.improved_content,
+                revision_notes=completion.revision_notes,
                 version=doc.version + 1
             )
 

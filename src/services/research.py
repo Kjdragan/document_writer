@@ -1,96 +1,126 @@
-from typing import List, Optional, Dict
-import httpx
 import os
+import json
+from datetime import datetime
+import httpx
 from loguru import logger
-from ..models import TavilyArticle, TavilyResponse
+from typing import List, Dict, Any
+from src.models.article import Article, ResearchData
 
 class ResearchService:
     def __init__(self):
-        """Initialize research service"""
-        api_key = os.getenv("TAVILY_API_KEY")
-        if not api_key:
+        """Initialize research service with API key"""
+        self.api_key = os.getenv("TAVILY_API_KEY")
+        if not self.api_key:
             raise ValueError("TAVILY_API_KEY environment variable not set")
-            
-        # Ensure API key has tvly- prefix
-        self.api_key = f"tvly-{api_key}" if not api_key.startswith("tvly-") else api_key
-        
-        # Configure client with longer timeout
-        timeout = httpx.Timeout(30.0, connect=30.0)  # 30 seconds for both read and connect
-        self.client = httpx.AsyncClient(timeout=timeout)
 
-    async def search_topic(self, query: str) -> List[TavilyArticle]:
-        """Search for articles about a topic
+    def _analyze_article(self, article: Article, index: int) -> str:
+        """
+        Format an article for document creation
         
         Args:
-            query: Search query
+            article: Article instance
+            index: Article index for numbering
             
         Returns:
-            List of top 10 articles sorted by relevance score
+            Formatted article content
         """
-        logger.info(f"Starting Tavily search for query: {query}")
+        # Format article with clear separation and metadata
+        formatted_content = f"""
+### Article {index + 1}: {article.title}
+**Source**: {article.url}
+**Published**: {article.published_date or 'Date not available'}
+
+{article.proper_content}
+
+---
+"""
+        return formatted_content
+
+    def research_topic(self, topic: str) -> str:
+        """
+        Research a topic using Tavily API and format results
         
-        try:
-            # Call Tavily search API
-            logger.debug("Preparing Tavily search request")
-            response = await self.client.post(
-                "https://api.tavily.com/search",
-                json={
-                    "api_key": self.api_key,
-                    "query": query,
-                    "search_depth": "advanced",
-                    "include_answer": False,
-                    "include_images": True,
-                    "include_image_descriptions": True,
-                    "include_raw_content": True,
-                    "max_results": 10,
-                    "include_domains": [],
-                    "exclude_domains": []
-                }
-            )
+        Args:
+            topic: Topic to research
             
-            # Log response details
+        Returns:
+            Formatted research results
+        """
+        try:
+            logger.info(f"Starting Tavily search for query: {topic}")
+            
+            # Prepare API request
+            url = "https://api.tavily.com/search"
+            headers = {
+                "content-type": "application/json",
+                "Authorization": f"Bearer {self.api_key}"
+            }
+            params = {
+                "query": topic,
+                "search_depth": "advanced",
+                "max_results": 10,
+                "include_raw_content": True,
+                "include_domains": [],
+                "exclude_domains": []
+            }
+            
+            # Make API request
+            with httpx.Client() as client:
+                response = client.post(url, json=params, headers=headers)
+                
             logger.info(f"Tavily API response status: {response.status_code}")
             
-            response.raise_for_status()
+            if response.status_code != 200:
+                raise Exception(f"Tavily API error: {response.text}")
+                
             data = response.json()
+            raw_articles = data.get('results', [])
             
-            # Log raw response for debugging
-            logger.debug(f"Tavily API raw response: {data}")
+            # Convert to our data model
+            articles = [Article.from_tavily_response(article_data) for article_data in raw_articles]
+            logger.info(f"Found {len(articles)} articles")
             
-            # Convert to our model and get top articles
-            tavily_response = TavilyResponse(articles=[
-                TavilyArticle(
-                    title=str(article.get("title", "")),
-                    url=str(article.get("url", "")),
-                    content=str(article.get("content", "")),
-                    raw_content=str(article.get("raw_content")) if article.get("raw_content") else None,
-                    score=float(article.get("score", 0.0)),
-                )
-                for article in data.get("results", [])
-            ])
+            # Log sample of content to verify
+            if articles:
+                first_article = articles[0]
+                logger.info(f"First article proper_content length: {len(first_article.proper_content)}")
+                logger.debug(f"First article content sources - Raw: {bool(first_article.raw_content)}, Regular: {bool(first_article.content)}")
             
-            # Log article details
-            logger.info(f"Found {len(tavily_response.articles)} articles")
-            for i, article in enumerate(tavily_response.articles, 1):
-                logger.debug(f"Article {i}: {article.title} (Score: {article.score})")
+            # Create research data container
+            research_data = ResearchData(
+                topic=topic,
+                timestamp=datetime.now(),
+                articles=articles
+            )
             
-            return tavily_response.articles
+            # Save raw research data
+            sanitized_topic = topic.lower().replace(" ", "_")
+            raw_filename = f"00_raw_research_{sanitized_topic}_{research_data.timestamp}.json"
+            raw_filepath = os.path.join("_workproduct", raw_filename)
+            os.makedirs("_workproduct", exist_ok=True)
+            
+            with open(raw_filepath, 'w', encoding='utf-8') as f:
+                json.dump(research_data.model_dump(), f, indent=2)
+                
+            logger.info(f"Saved raw research data to {raw_filepath}")
+            print(f"Raw research data saved to {raw_filename}")
+            
+            # Process and format articles
+            formatted_articles = []
+            for i, article in enumerate(articles):
+                formatted_content = self._analyze_article(article, i)
+                formatted_articles.append(formatted_content)
+            
+            # Combine all formatted content with a header
+            research_content = f"""# Research Results: {topic}
+*Generated on: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}*
 
-        except httpx.TimeoutException as e:
-            logger.error(f"Timeout while calling Tavily API: {str(e)}")
-            raise
-        except httpx.HTTPStatusError as e:
-            logger.error(f"HTTP error from Tavily API: {str(e)}")
-            if e.response.status_code == 401:
-                logger.error("Invalid API key or authentication error")
-            raise
-        except httpx.RequestError as e:
-            logger.error(f"Network error while calling Tavily API: {str(e)}")
-            raise
+**Total Articles Found: {research_data.total_articles}**
+
+{chr(10).join(formatted_articles)}"""
+            
+            return research_content
+            
         except Exception as e:
-            logger.error(f"Unexpected error during research: {str(e)}")
+            logger.error(f"Error during research: {str(e)}")
             raise
-
-    async def close(self):
-        """Close the HTTP client"""
-        await self.client.aclose()
